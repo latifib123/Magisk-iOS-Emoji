@@ -17,7 +17,9 @@ Systemlessly replaces the emoji font with iOS 18.4 Emoji.
 
 | Root Manager | Status | Minimum Version |
 |--------------|--------|-----------------|
-| KernelSU     | ✅ Supported | v0.6.0+ || KernelSU Next | ✅ Supported | Latest || Magisk       | ✅ Supported | v24.0+ |
+| KernelSU Next | ✅ Supported | Latest |
+| KernelSU     | ✅ Supported | v0.6.0+ |
+| Magisk       | ✅ Supported | v24.0+  |
 | APatch       | ✅ Supported | v10300+ |
 
 ## Installation
