@@ -1,7 +1,7 @@
 id=iOS_Emoji
-name=iOS 18.4 Emoji font
-version=v18.4
-versionCode=18400
+name=iOS 18.4 Emoji Font
+version=v18.4.3
+versionCode=18403
 author=Keinta15
-description=Systemlessly replaces emoji font with iOS 18.4 Emoji
-updateJson=https://raw.githubusercontent.com/Keinta15/Magisk-iOS-Emoji/main/updater.json
+description=Systemlessly replaces emoji font with iOS 18.4 Emoji. Supports Android 10-16 QPR1 with KernelSU/KernelSU Next/Magisk/APatch.
+updateJson=https://raw.githubusercontent.com/Keinta15/KernelSU-iOS-Emoji/main/update.json

@@ -1,13 +1,64 @@
 #!/system/bin/sh
 
 # Module directory (where the script is located)
-MODPATH=${0%/*}
+MODDIR=${0%/*}
 
-# Logging configuration
-LOGFILE="$MODPATH/service.log" # Log file
+#################
+# Detect Root Manager
+#################
+
+if [ "$KSU" = true ]; then
+    ROOT_MANAGER="KernelSU"
+    # Check for KernelSU Next
+    if [ "$KSU_KERNEL_VER_CODE" ] || grep -q "next" /proc/version 2>/dev/null; then
+        ROOT_MANAGER="KernelSU-Next"
+    fi
+elif [ "$APATCH" = true ]; then
+    ROOT_MANAGER="APatch"
+else
+    ROOT_MANAGER="Magisk"
+fi
+
+#################
+# Logging Configuration
+#################
+
+LOGFILE="$MODDIR/service.log"
 MAX_LOG_SIZE=$((5 * 1024 * 1024)) # 5 MB
-MAX_LOG_FILES=3 # Keep up to 3 archived logs
-MAX_LOG_AGE_DAYS=7 # Delete logs older than 7 days
+MAX_LOG_FILES=3
+MAX_LOG_AGE_DAYS=7
+
+# Ensure the module directory exists
+mkdir -p "$MODDIR"
+
+# Logging function
+log() {
+    # Delete old log files
+    find "$MODDIR" -name "$(basename "$LOGFILE")*" -type f -mtime +$MAX_LOG_AGE_DAYS -delete 2>/dev/null
+
+    # Check if log file exists and is too large
+    if [ -f "$LOGFILE" ]; then
+        local log_size=$(stat -c%s "$LOGFILE" 2>/dev/null || echo 0)
+        if [ "$log_size" -gt "$MAX_LOG_SIZE" ]; then
+            # Rotate logs
+            for i in $(seq $MAX_LOG_FILES -1 1); do
+                [ -f "$LOGFILE.$i" ] && mv "$LOGFILE.$i" "$LOGFILE.$((i+1))" 2>/dev/null
+            done
+            mv "$LOGFILE" "$LOGFILE.1" 2>/dev/null
+        fi
+    fi
+
+    # Create log message
+    local log_message="$(date '+%Y-%m-%d %H:%M:%S') - $1"
+    echo "$log_message" >> "$LOGFILE"
+
+    # Display simplified message to user (for action.sh)
+    echo "[*] $(echo "$1" | sed 's/^[A-Z]*: //')"
+}
+
+#################
+# Configuration
+#################
 
 # Facebook app package names
 FACEBOOK_APPS="com.facebook.orca com.facebook.katana com.facebook.lite com.facebook.mlite"
@@ -16,51 +67,43 @@ FACEBOOK_APPS="com.facebook.orca com.facebook.katana com.facebook.lite com.faceb
 GMS_FONT_PROVIDER="com.google.android.gms/com.google.android.gms.fonts.provider.FontsProvider"
 GMS_FONT_UPDATER="com.google.android.gms/com.google.android.gms.fonts.update.UpdateSchedulerService"
 
-# Paths for cleanup
+# Paths
 DATA_FONTS_DIR="/data/fonts"
-GMS_FONTS_DIR="/data/data/com.google.android.gms/files/fonts/opentype"
+SOURCE_FONT="$MODDIR/system/fonts/NotoColorEmoji.ttf"
 
-# Ensure the log directory exists
-mkdir -p "$MODPATH"
+#################
+# Helper Functions
+#################
 
-# Logging function with user feedback
-log() {
-    # Delete old log files
-    find "$MODPATH" -name "$(basename "$LOGFILE")*" -type f -mtime +$MAX_LOG_AGE_DAYS -exec rm -f {} \;
-
-    # Check if log file exists and is too large
-    if [ -f "$LOGFILE" ] && [ $(stat -c%s "$LOGFILE") -gt $MAX_LOG_SIZE ]; then
-        # Rotate logs
-        for i in $(seq $MAX_LOG_FILES -1 1); do
-            if [ -f "$LOGFILE.$i" ]; then
-                mv "$LOGFILE.$i" "$LOGFILE.$((i+1))"
-            fi
-        done
-        mv "$LOGFILE" "$LOGFILE.1"
-    fi
-
-    # Create log message
-    local log_message="$(date '+%Y-%m-%d %H:%M:%S') - $1"
-    echo "$log_message" >> "$LOGFILE"
-    
-    # Display simplified message to user
-    echo "[*] $(echo "$1" | sed 's/^[A-Z]*: //')"
-}
-
-# Function to check if a package/service exists
-service_exists() {
-    pm list packages | grep -q "$1"
+# Function to check if a package is installed
+package_installed() {
+    pm list packages 2>/dev/null | grep -q "^package:$1$"
     return $?
 }
 
+# Function to check if a service/component exists
+service_exists() {
+    pm list packages 2>/dev/null | grep -q "$(echo "$1" | cut -d'/' -f1)"
+    return $?
+}
 
-# Log script header
+#################
+# Script Header
+#################
+
 log "================================================"
-log "iOS Emoji 18.4 service.sh Script"
+log "iOS Emoji 18.4 - service.sh"
+log "Root Manager: $ROOT_MANAGER"
 log "Brand: $(getprop ro.product.brand)"
 log "Device: $(getprop ro.product.model)"
 log "Android Version: $(getprop ro.build.version.release)"
+log "SDK Version: $(getprop ro.build.version.sdk)"
+ANDROID_SDK=$(getprop ro.build.version.sdk)
 log "================================================"
+
+#################
+# Wait for Boot
+#################
 
 # Wait until the device has completed booting
 while [ "$(getprop sys.boot_completed)" != "1" ]; do
@@ -72,112 +115,165 @@ while [ ! -d /sdcard ]; do
     sleep 5
 done
 
-log "INFO: Service started."
+log "INFO: Service started via $ROOT_MANAGER"
 
-# Replace in-app emoji fonts
+#################
+# Manual Mount for KernelSU
+#################
+
+if [ "$KSU" = true ]; then
+    log "INFO: Verifying KernelSU direct mounts"
+    
+    SOURCE_FONT_FILE="$MODDIR/system/fonts/NotoColorEmoji.ttf"
+    TARGET_FONT_FILE="/system/fonts/NotoColorEmoji.ttf"
+    
+    if [ -f "$SOURCE_FONT_FILE" ] && [ -f "$TARGET_FONT_FILE" ]; then
+        if ! mount | grep -q "$TARGET_FONT_FILE"; then
+            log "INFO: Mounting system font directly"
+            
+            # Try nsenter method for KernelSU Next
+            if [ "$ROOT_MANAGER" = "KernelSU-Next" ] && [ -f "/system/bin/nsenter" ]; then
+                log "INFO: Using nsenter method for KernelSU Next"
+                nsenter -t 1 -m -- mount --bind "$SOURCE_FONT_FILE" "$TARGET_FONT_FILE" 2>/dev/null
+            else
+                mount --bind "$SOURCE_FONT_FILE" "$TARGET_FONT_FILE" 2>/dev/null
+            fi
+            
+            if [ $? -eq 0 ]; then
+                chmod 644 "$TARGET_FONT_FILE" 2>/dev/null
+                log "INFO: Successfully mounted system emoji font"
+            else
+                log "WARN: Direct mount failed, font may not appear"
+            fi
+        else
+            log "INFO: System font already mounted"
+        fi
+    fi
+fi
+
+#################
+# Font Replacement
+#################
+
 replace_emoji_fonts() {
     log "INFO: Starting emoji replacement process..."
 
     # Check if the source emoji font exists
-    if [ ! -f "$MODPATH/system/fonts/NotoColorEmoji.ttf" ]; then
-        log "ERROR: Source emoji font not found. Skipping replacement."
-        return
+    if [ ! -f "$SOURCE_FONT" ]; then
+        log "ERROR: Source emoji font not found: $SOURCE_FONT"
+        return 1
     fi
 
-    # Find all .ttf files containing "Emoji" in their names
-    EMOJI_FONTS=$(find /data/data -iname "*emoji*.ttf" -print)
+    log "INFO: Source font found ($(stat -c%s "$SOURCE_FONT" 2>/dev/null || echo "unknown") bytes)"
 
-    if [ -z "$EMOJI_FONTS" ]; then
-        log "INFO: No emoji fonts found to replace. Skipping."
-        return
+    # Find all .ttf files containing "Emoji" in their names
+    local emoji_fonts=$(find /data/data -iname "*emoji*.ttf" -type f 2>/dev/null)
+
+    if [ -z "$emoji_fonts" ]; then
+        log "INFO: No emoji fonts found in app data. Skipping."
+        return 0
     fi
 
     # Replace each emoji font with the custom font
-    for font in $EMOJI_FONTS; do
-        # Check if the target font file is writable
-        if [ ! -w "$font" ]; then
-            log "ERROR: Font file is not writable: $font"
+    echo "$emoji_fonts" | while read font; do
+        [ -z "$font" ] && continue
+
+        # Skip if file doesn't exist or isn't writable
+        if [ ! -f "$font" ]; then
             continue
         fi
 
         log "INFO: Replacing emoji font: $font"
-        if ! cp "$MODPATH/system/fonts/NotoColorEmoji.ttf" "$font"; then
-            log "ERROR: Failed to replace emoji font: $font"
-        else
-            log "INFO: Successfully replaced emoji font: $font"
-        fi
 
-        # Set permissions for the replaced file
-        if ! chmod 644 "$font"; then
-            log "ERROR: Failed to set permissions for: $font"
+        if cp "$SOURCE_FONT" "$font" 2>/dev/null; then
+            chmod 644 "$font" 2>/dev/null
+            # Restore SELinux context for Android 16 QPR1
+            if [ "$ANDROID_SDK" -ge 35 ]; then
+                chcon u:object_r:system_file:s0 "$font" 2>/dev/null || true
+            fi
+            log "INFO: Successfully replaced: $font"
         else
-            log "INFO: Successfully set permissions for: $font"
+            log "ERROR: Failed to replace: $font"
         fi
     done
 
-    log "INFO: Emoji replacement process completed."
+    log "INFO: Emoji replacement process completed"
 }
 
+#################
+# Main Execution
+#################
+
+# Run font replacement
 replace_emoji_fonts
 
 # Force-stop Facebook apps after all replacements are done
-log "INFO: Force-stopping apps..."
+log "INFO: Force-stopping Facebook apps..."
 for app in $FACEBOOK_APPS; do
-    if ! am force-stop "$app"; then
-        log "ERROR: Failed to force-stop app: $app"
-    else
-        log "INFO: Successfully force-stopped app: $app"
+    if package_installed "$app"; then
+        if am force-stop "$app" 2>/dev/null; then
+            log "INFO: Force-stopped: $app"
+        else
+            log "WARN: Could not force-stop: $app"
+        fi
     fi
 done
 
-# Add a delay to allow the system to process the changes
+# Small delay to allow system to process
 sleep 2
 
-# Disable GMS font services if they exist
-if service_exists "$GMS_FONT_PROVIDER"; then
-    log "INFO: Disabling GMS font provider: $GMS_FONT_PROVIDER"
-    if ! pm disable "$GMS_FONT_PROVIDER"; then
-        log "ERROR: Failed to disable GMS font provider: $GMS_FONT_PROVIDER"
+#################
+# Disable GMS Font Services
+#################
+
+if service_exists "com.google.android.gms"; then
+    log "INFO: Attempting to disable GMS font services..."
+
+    # Try to disable font provider
+    if pm disable "$GMS_FONT_PROVIDER" 2>/dev/null; then
+        log "INFO: Disabled GMS font provider"
     else
-        log "INFO: Successfully disabled GMS font provider: $GMS_FONT_PROVIDER"
+        log "INFO: Could not disable GMS font provider (may require additional permissions)"
+    fi
+
+    # Try to disable font updater
+    if pm disable "$GMS_FONT_UPDATER" 2>/dev/null; then
+        log "INFO: Disabled GMS font updater"
+    else
+        log "INFO: Could not disable GMS font updater (may require additional permissions)"
     fi
 else
-    log "INFO: GMS font provider not found: $GMS_FONT_PROVIDER"
+    log "INFO: GMS not found, skipping font service disable"
 fi
 
-if service_exists "$GMS_FONT_UPDATER"; then
-    log "INFO: Disabling GMS font updater: $GMS_FONT_UPDATER"
-    if ! pm disable "$GMS_FONT_UPDATER"; then
-        log "ERROR: Failed to disable GMS font updater: $GMS_FONT_UPDATER"
-    else
-        log "INFO: Successfully disabled GMS font updater: $GMS_FONT_UPDATER"
-    fi
-else
-    log "INFO: GMS font updater not found: $GMS_FONT_UPDATER"
-fi
+#################
+# Cleanup
+#################
 
-# Clean up leftover font files
+# Clean up /data/fonts directory (Android 12+)
 log "INFO: Cleaning up leftover font files..."
 if [ -d "$DATA_FONTS_DIR" ]; then
-    if ! rm -rf "$DATA_FONTS_DIR"; then
-        log "ERROR: Failed to clean up directory: $DATA_FONTS_DIR"
+    if rm -rf "$DATA_FONTS_DIR" 2>/dev/null; then
+        log "INFO: Removed: $DATA_FONTS_DIR"
     else
-        log "INFO: Successfully cleaned up directory: $DATA_FONTS_DIR"
+        log "WARN: Could not remove: $DATA_FONTS_DIR"
     fi
 else
-    log "INFO: Directory not found: $DATA_FONTS_DIR"
+    log "INFO: No /data/fonts directory found"
 fi
 
-# Commented out the deletion of .ttf files in the opentype directory (still need testing)
-# if [ -d "$GMS_FONTS_DIR" ]; then
-#     if ! rm -rf "$GMS_FONTS_DIR"/*ttf; then
-#         log "ERROR: Failed to clean up ttf files in directory: $GMS_FONTS_DIR"
-#     else
-#         log "INFO: Successfully cleaned up ttf files in directory: $GMS_FONTS_DIR"
-#     fi
-# else
-#     log "INFO: Directory not found: $GMS_FONTS_DIR"
-# fi
+# Android 16 QPR1: Clear font cache
+if [ "$ANDROID_SDK" -ge 35 ]; then
+    log "INFO: Android 16+ detected, clearing system font cache"
+    rm -rf /data/system/theme/fonts 2>/dev/null && log "INFO: Cleared theme font cache"
+    rm -rf /data/system/users/*/fonts 2>/dev/null && log "INFO: Cleared user font cache"
+fi
 
-log "INFO: Service completed."
+#################
+# Completion
+#################
+
+log "INFO: Service completed successfully"
 log "================================================"
+
+exit 0
